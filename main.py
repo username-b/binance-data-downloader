@@ -13,13 +13,11 @@ from utils.date_utils import daterange
 
 from downloader.binance_downloader import download_daily_data
 from processing.csv_loader import load_raw_csv
-from processing.minute_aggregator import aggregate_to_minutes
 from processing.feature_engineering import (build_features_from_klines, build_features_from_index_price, 
                                             build_features_from_mark_price, build_features_from_premium, 
                                             build_features_from_trades, build_features_from_aggTrades,
                                             build_features_from_orderbook)
 from storage.parquet_writer import write_parquet
-
 
 logger = get_logger(__name__)
 

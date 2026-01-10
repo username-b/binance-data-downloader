@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from aggTrades import get_L_last20s, get_aggTrades_delta
-from trades import get_trades_Cp
+from aggTrades import get_L_last20s, get_aggTrades_delta, get_aggTrades_FPI, get_aggTrades_Feff, get_aggTrades_Fasym, get_aggTrades_Flate, get_aggTrades_RV
+from trades import get_trades_Cp, get_trades_entropy, get_trades_Ceff
+from orderbook import get_orderbook_tau_ratio, get_orderbook_Uimb
 
 def build_features_from_klines(df_klines: pd.DataFrame):
     """
@@ -202,7 +203,7 @@ def build_features_from_premium(
     return out
 
 
-def build_features_from_aggTrades(df: pd.DataFrame) -> pd.DataFrame:
+def build_features_from_aggTrades(df: pd.DataFrame, close_ref) -> pd.DataFrame:
     """
     Общий билдер фичей из aggTrades.
     Считает:
@@ -232,79 +233,34 @@ def build_features_from_aggTrades(df: pd.DataFrame) -> pd.DataFrame:
     # --- фичи
     df_delta = get_aggTrades_delta(tmp)
     df_L = get_L_last20s(tmp)
+    df_fpi = get_aggTrades_FPI(tmp)
+    df_feff = get_aggTrades_Feff(tmp, close_ref)
+    df_fasym = get_aggTrades_Fasym(tmp)
+    df_flate = get_aggTrades_Flate(tmp)
+    df_rv = get_aggTrades_RV(tmp)
 
     # --- объединение
-    grouped = (
-        df_delta
-        .merge(df_L, on="minute", how="left")
-    )
+    for df_feat in (df_L, df_fpi, df_feff, df_fasym, df_flate, df_rv):
+        df = df_delta.join(df_feat.set_index("minute"))
 
-    grouped["timestamp"] = pd.to_datetime(
-        grouped["minute"] * 60_000,
-        unit="ms",
-    )
+    df.reset_index(inplace=True)
 
-    grouped.sort_values("timestamp", inplace=True)
 
-    return grouped[
+    df.sort_values("timestamp", inplace=True)
+
+    return df[
         [
             "timestamp",
             "L_last20s",
             "delta_v_norm",
+            "F_PI",
+            "F_eff",
+            "F_asym",
+            "F_late",
+            "RV"
         ]
     ]
 
-def build_features_from_trades(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Общий билдер фичей из aggTrades.
-    Считает:
-    - delta_v_norm
-    - L_last20s
-    """
-
-    # --- общая numpy-предобработка (ОДИН РАЗ)
-    transact_time = df["transact_time"].values
-    qty = df["quantity"].astype("float64").values
-    is_sell = df["isBuyerMaker"].astype(bool).values
-
-    minute = transact_time // 60_000
-    offset_ms = transact_time % 60_000
-
-    signed_qty = np.where(is_sell, -qty, qty)
-
-    tmp = pd.DataFrame(
-        {
-            "minute": minute,
-            "signed_qty": signed_qty,
-            "abs_qty": qty,
-            "offset_ms": offset_ms,
-        }
-    )
-
-    # --- фичи
-    df_delta = get_aggTrades_delta(tmp)
-    df_L = get_L_last20s(tmp)
-
-    # --- объединение
-    grouped = (
-        df_delta
-        .merge(df_L, on="minute", how="left")
-    )
-
-    grouped["timestamp"] = pd.to_datetime(
-        grouped["minute"] * 60_000,
-        unit="ms",
-    )
-
-    grouped.sort_values("timestamp", inplace=True)
-
-    return grouped[
-        [
-            "timestamp",
-            "L_last20s",
-            "delta_v_norm",
-        ]
-    ]
 
 def build_features_from_trades(
     df: pd.DataFrame,
@@ -334,25 +290,125 @@ def build_features_from_trades(
         }
     )
 
-    # --- фича Cp
     df_cp = get_trades_Cp(tmp, p=p)
+    df_entropy = get_trades_entropy(tmp)
+    df_ceff = get_trades_Ceff(tmp)
 
-    if df_cp.empty:
+    df = df_cp.set_index("minute")
+
+    for df_feat in (df_entropy, df_ceff):
+        df = df.join(df_feat.set_index("minute"))
+
+    df.reset_index(inplace=True)
+
+
+    if df.empty:
         return pd.DataFrame(
-            columns=["timestamp", "Cp"]
+            columns=["timestamp", "Cp", "H_norm", "C_eff"]
         )
 
-    # --- timestamp
-    df_cp["timestamp"] = pd.to_datetime(
-        df_cp["minute"] * 60_000,
+    # --- timestamp (ОДИН РАЗ)
+    df["timestamp"] = pd.to_datetime(
+        df["minute"] * 60_000,
         unit="ms",
     )
 
-    df_cp.sort_values("timestamp", inplace=True)
+    df.sort_values("timestamp", inplace=True)
 
-    return df_cp[
+    return df[
         [
             "timestamp",
             "Cp",
+            "H_norm",
+            "C_eff"
+        ]
+    ]
+
+def build_features_from_orderbook(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Общий билдер фичей из orderbook (bookTicker).
+
+    Считает:
+    - U_imb   : баланс обновлений best bid / best ask
+    - tau_ratio : отношение медианных времен жизни котировок
+    """
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=["timestamp", "U_imb", "tau_ratio"]
+        )
+
+    # --- numpy-предобработка (ОДИН РАЗ)
+    time = df["transaction_time"].values
+    bid = df["best_bid_price"].astype("float64").values
+    ask = df["best_ask_price"].astype("float64").values
+
+    minute = time // 60_000
+
+    # --- изменения котировок
+    bid_change = np.zeros_like(bid, dtype=bool)
+    ask_change = np.zeros_like(ask, dtype=bool)
+
+    bid_change[1:] = bid[1:] != bid[:-1]
+    ask_change[1:] = ask[1:] != ask[:-1]
+
+    # --- время жизни котировок
+    bid_lifetime = np.zeros_like(time, dtype=np.int64)
+    ask_lifetime = np.zeros_like(time, dtype=np.int64)
+
+    last_bid_change = time[0]
+    last_ask_change = time[0]
+
+    for i in range(1, len(time)):
+        if bid_change[i]:
+            bid_lifetime[i - 1] = time[i] - last_bid_change
+            last_bid_change = time[i]
+
+        if ask_change[i]:
+            ask_lifetime[i - 1] = time[i] - last_ask_change
+            last_ask_change = time[i]
+
+    # --- минимальный tmp
+    tmp = pd.DataFrame(
+        {
+            "minute": minute,
+            "bid_change": bid_change,
+            "ask_change": ask_change,
+            "bid_lifetime": bid_lifetime,
+            "ask_lifetime": ask_lifetime,
+        }
+    )
+
+    # --- фичи
+    df_uimb = get_orderbook_Uimb(tmp)
+    df_tau = get_orderbook_tau_ratio(tmp)
+
+    # --- объединение
+    df_feat = df_uimb.merge(
+        df_tau,
+        on="minute",
+        how="outer",
+    )
+
+    if df_feat.empty:
+        return pd.DataFrame(
+            columns=["timestamp", "U_imb", "tau_ratio"]
+        )
+
+    # --- timestamp
+    df_feat["timestamp"] = pd.to_datetime(
+        df_feat["minute"] * 60_000,
+        unit="ms",
+    )
+
+    df_feat.sort_values("timestamp", inplace=True)
+
+    return df_feat[
+        [
+            "timestamp",
+            "U_imb",
+            "tau_ratio",
         ]
     ]
