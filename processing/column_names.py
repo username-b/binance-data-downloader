@@ -1,6 +1,6 @@
 # === Словари имен столбцов по источнику ===
 
-column_names = {
+COLUMN_NAMES = {
     "klines": [
         "open_time", "open", "high", "low", "close", "volume",
         "close_time", "quote_volume", "count", "taker_buy_volume",

@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from aggTrades import get_L_last20s, get_aggTrades_delta, get_aggTrades_FPI, get_aggTrades_Feff, get_aggTrades_Fasym, get_aggTrades_Flate, get_aggTrades_RV
-from trades import get_trades_Cp, get_trades_entropy, get_trades_Ceff
-from orderbook import get_orderbook_tau_ratio, get_orderbook_Uimb
+from processing.aggTrades import get_L_last20s, get_aggTrades_delta, get_aggTrades_FPI, get_aggTrades_Feff, get_aggTrades_Fasym, get_aggTrades_Flate, get_aggTrades_RV
+from processing.trades import get_trades_Cp, get_trades_entropy, get_trades_Ceff
+from processing.orderbook import get_orderbook_tau_ratio, get_orderbook_Uimb
 
 def build_features_from_klines(df_klines: pd.DataFrame):
     """
@@ -105,9 +105,6 @@ def build_features_from_index_price(
         {
             "timestamp": df.index,
             "index_diff": index_diff,
-            "index_diff_pct": index_diff / close_spot,
-            "index_log_ratio": np.log(close / close_spot),
-            "index_diff_change": np.diff(index_diff, prepend=np.nan),
         },
         index=df.index,
     )
@@ -145,8 +142,6 @@ def build_features_from_mark_price(
         {
             "timestamp": df.index,
             "mark_diff": mark_diff,
-            "mark_diff_pct": mark_diff / close_spot,
-            "mark_log_ratio": np.log(close / close_spot),
             "mark_diff_ema_5": mark_diff_s.ewm(span=5, adjust=False).mean(),
             "mark_diff_ema_15": mark_diff_s.ewm(span=15, adjust=False).mean(),
         },
@@ -203,34 +198,37 @@ def build_features_from_premium(
     return out
 
 
-def build_features_from_aggTrades(df: pd.DataFrame, close_ref) -> pd.DataFrame:
+def build_features_from_aggTrades(
+    df: pd.DataFrame,
+    close_ref: pd.DataFrame,
+) -> pd.DataFrame:
     """
     Общий билдер фичей из aggTrades.
-    Считает:
-    - delta_v_norm
-    - L_last20s
     """
-
-    # --- общая numpy-предобработка (ОДИН РАЗ)
-    transact_time = df["transact_time"].values
-    qty = df["quantity"].astype("float64").values
-    is_sell = df["isBuyerMaker"].astype(bool).values
+    df = df.rename(columns={
+        "timestamp": "transact_time",
+        "qty":"quantity",
+        })
+    transact_time = df["transact_time"].to_numpy()
+    qty = df["quantity"].astype("float64").to_numpy()
+    is_sell = df["is_buyer_maker"].astype(bool).to_numpy()
 
     minute = transact_time // 60_000
     offset_ms = transact_time % 60_000
 
     signed_qty = np.where(is_sell, -qty, qty)
+    price = df["price"].astype("float64").to_numpy()
 
     tmp = pd.DataFrame(
         {
             "minute": minute,
             "signed_qty": signed_qty,
-            "abs_qty": qty,
+            "price": price,
+            "quantity": qty,
             "offset_ms": offset_ms,
         }
     )
 
-    # --- фичи
     df_delta = get_aggTrades_delta(tmp)
     df_L = get_L_last20s(tmp)
     df_fpi = get_aggTrades_FPI(tmp)
@@ -239,16 +237,28 @@ def build_features_from_aggTrades(df: pd.DataFrame, close_ref) -> pd.DataFrame:
     df_flate = get_aggTrades_Flate(tmp)
     df_rv = get_aggTrades_RV(tmp)
 
-    # --- объединение
-    for df_feat in (df_L, df_fpi, df_feff, df_fasym, df_flate, df_rv):
-        df = df_delta.join(df_feat.set_index("minute"))
+    df_feat = df_delta.set_index("minute")
 
-    df.reset_index(inplace=True)
+    for df_part in (
+        df_L,
+        df_fpi,
+        df_feff,
+        df_fasym,
+        df_flate,
+        df_rv,
+    ):
+        df_feat = df_feat.join(df_part.set_index("minute"))
 
+    df_feat.reset_index(inplace=True)
 
-    df.sort_values("timestamp", inplace=True)
+    df_feat["timestamp"] = pd.to_datetime(
+        df_feat["minute"] * 60_000,
+        unit="ms",
+    )
 
-    return df[
+    df_feat.sort_values("timestamp", inplace=True)
+
+    return df_feat[
         [
             "timestamp",
             "L_last20s",
@@ -257,10 +267,9 @@ def build_features_from_aggTrades(df: pd.DataFrame, close_ref) -> pd.DataFrame:
             "F_eff",
             "F_asym",
             "F_late",
-            "RV"
+            "RV",
         ]
     ]
-
 
 def build_features_from_trades(
     df: pd.DataFrame,
@@ -271,11 +280,13 @@ def build_features_from_trades(
     Сейчас считает:
     - Cp (Top-p% агрессивных покупок)
     """
-
+    df = df.rename(
+    columns={
+        "timestamp": "time",})
     # --- общая numpy-предобработка (ОДИН РАЗ)
     trade_time = df["time"].values
     qty = df["qty"].astype("float64").values
-    is_sell = df["isBuyerMaker"].astype(bool).values
+    is_sell = df["is_buyer_maker"].astype(bool).values
 
     minute = trade_time // 60_000
 

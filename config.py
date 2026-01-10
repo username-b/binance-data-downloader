@@ -34,8 +34,8 @@ SYMBOL = "ADAUSDT"
 INTERVAL = "1m"
 
 # Период исследования
-START_DATE = date(2020, 1, 1)
-END_DATE = date(2020, 1, 3)
+START_DATE = date(2024, 3, 1)
+END_DATE = date(2024, 4, 1)
 
 # ============================================================
 # Пути хранения данных
@@ -67,3 +67,13 @@ TIMESTAMP_COLUMN = "timestamp"
 
 # Тип времени: миллисекунды Unix Epoch
 TIMESTAMP_UNIT = "ms"
+
+PIPELINE_ORDER = [
+    "klines",       # ОБЯЗАТЕЛЬНО
+    "index",
+    "mark",
+    "premium",
+    "aggTrades",
+    "trades",
+    "orderbook",
+]

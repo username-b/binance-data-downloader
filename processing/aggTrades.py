@@ -83,7 +83,7 @@ def get_aggTrades_FPI(
 
     for minute_val, g in tmp.groupby("minute", sort=True):
         p = g["price"].values
-        q = g["qty"].values
+        q = g["quantity"].values
         sign = g["sign"].values
 
         if p.size <= 1:
