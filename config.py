@@ -87,7 +87,7 @@ DATASETS = {
     "indexPriceKlines": {
         "source": "indexPriceKlines",
         "has_interval": True,
-        "file_pattern": "{symbol}-indexPriceKlines-{interval}-{date}.zip",
+        "file_pattern": "{symbol}-{interval}-{date}.zip",
 
         "columns": [
             "open_time",
@@ -105,7 +105,7 @@ DATASETS = {
     "markPriceKlines": {
         "source": "markPriceKlines",
         "has_interval": True,
-        "file_pattern": "{symbol}-markPriceKlines-{interval}-{date}.zip",
+        "file_pattern": "{symbol}-{interval}-{date}.zip",
 
         "columns": [
             "open_time",
@@ -123,7 +123,7 @@ DATASETS = {
     "premiumIndexKlines": {
         "source": "premiumIndexKlines",
         "has_interval": True,
-        "file_pattern": "{symbol}-premiumIndexKlines-{interval}-{date}.zip",
+        "file_pattern": "{symbol}-{interval}-{date}.zip",
 
         "columns": [
             "open_time",
