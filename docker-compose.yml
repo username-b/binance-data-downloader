@@ -2,6 +2,7 @@ version: "3.9"
 
 services:
   downloader:
+    build: .
     image: binance-downloader
     env_file:
       - .env
