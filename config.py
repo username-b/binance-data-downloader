@@ -6,12 +6,12 @@ SYMBOL = "ADAUSDT"
 YC_BUCKET = "binance-data-downloader"
 DAYS_BACK = 1800
 INTERVAL = "1m"
-DATASET = "klines"
+DATASET = "aggTrades"
 # возможные значения:
 # klines | aggTrades | trades | bookTicker
 
 BASE_ROOT = "https://data.binance.vision/data/futures/um/daily"
-SOURCE = "klines"
+SOURCE = "aggTrades"
 
 DATA_ROOT = r"C:\projects\binance-data-downloader\data\raw"
 
