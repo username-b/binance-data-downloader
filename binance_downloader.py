@@ -3,15 +3,17 @@ import zipfile
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone, date
+from collections import defaultdict
 from tqdm import tqdm
+import psutil, time
 
 import config
 from utils.logger import get_logger
-from downloader.yandex_storage import YandexObjectStorage
+from yandex_storage import YandexObjectStorage
 
 
 logger = get_logger(__name__)
-
+p = psutil.Process()
 
 # =========================
 # STORAGE
@@ -93,60 +95,65 @@ def load_and_process_file(url: str) -> pd.DataFrame | None:
 # =========================
 # MAIN LOOP
 # =========================
+
+weeks: dict[tuple[int, int], list[datetime]] = defaultdict(list)
+
+for dt in dates:
+    year, week, _ = dt.isocalendar()
+    weeks[(year, week)].append(dt)
 weekly_frames: list[pd.DataFrame] = []
 
-for dt in tqdm(dates, desc="Downloading klines"):
-    y = dt.year
-    m = dt.month
-    d = dt.day
+for (year, week), week_dates in weeks.items():
+    weekly_frames = []
 
-    path = (
-        f"{config.BASE_ROOT}/"
-        f"{config.SOURCE}/"
-        f"{config.SYMBOL}/"
-        f"{config.INTERVAL}"
-    )
+    for dt in tqdm(week_dates, desc=f"Week {year}-W{week}"):
+        y, m, d = dt.year, dt.month, dt.day
 
-    file_name = f"{config.SYMBOL}-{config.INTERVAL}-{y}-{m:02d}-{d:02d}.zip"
-    url = f"{path}/{file_name}"
+        path = (
+            f"{config.BASE_ROOT}/"
+            f"{config.SOURCE}/"
+            f"{config.SYMBOL}/"
+            f"{config.INTERVAL}"
+        )
 
-    df = load_and_process_file(url)
+        file_name = f"{config.SYMBOL}-{config.INTERVAL}-{y}-{m:02d}-{d:02d}.zip"
+        url = f"{path}/{file_name}"
 
-    if df is None or df.empty:
-        logger.info("Skipped %s (no data)", dt)
-        continue
+        df = load_and_process_file(url)
 
-    key = (
-        f"symbol={config.SYMBOL}/"
-        f"interval={config.INTERVAL}/"
-        f"year={y}/"
-        f"month={m:02d}/"
-        f"day={d:02d}.parquet"
-    )
+        if df is None or df.empty:
+            logger.info("Skipped %s (no data)", dt)
+            continue
 
-    weekly_frames.append(df)
+        weekly_frames.append(df)
 
     if not weekly_frames:
-        logger.warning("No data collected for the period")
-    else:
-        weekly_df = pd.concat(weekly_frames, ignore_index=True)
-        klines_base_df = extract_klines_base(weekly_df)
-        start_date = dates[0]
-        end_date = dates[-1]
+        logger.warning("No data collected for week %s-W%s", year, week)
+        continue
 
-        key = (
-            f"{config.SYMBOL}-{config.INTERVAL}-"
-            f"{start_date:%Y-%m-%d}_{end_date:%Y-%m-%d}.parquet"
-        )
+    weekly_df = pd.concat(weekly_frames, ignore_index=True)
+    klines_base_df = extract_klines_base(weekly_df)
 
-        raw_storage.write_parquet(weekly_df, key)
-        base_storage.write_parquet(klines_base_df, key)
+    start_date = min(week_dates)
+    end_date = max(week_dates)
 
-        logger.info(
-            "Saved weekly parquet %s | rows=%d",
-            key,
-            len(weekly_df)
-        )
+    key = (
+        f"{config.SYMBOL}-{config.INTERVAL}-"
+        f"{start_date:%Y-%m-%d}_{end_date:%Y-%m-%d}.parquet"
+    )
+
+    raw_storage.write_parquet(weekly_df, key)
+    base_storage.write_parquet(klines_base_df, key)
+
+    logger.info(
+        "Saved weekly parquet %s | rows=%d",
+        key,
+        len(weekly_df)
+    )
+
 
 
 logger.info("Parquet download finished successfully")
+
+print("RAM (MB):", p.memory_info().rss / 1024 / 1024)
+print("CPU (%):", p.cpu_percent(interval=1))
