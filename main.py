@@ -38,9 +38,9 @@ from storage.parquet_writer import write_parquet
 logger = get_logger(__name__)
 
 
-# ============================================================================
+# =============================================================================
 # Source detection
-# ============================================================================
+# =============================================================================
 
 def detect_source(filename: str) -> str | None:
     name = filename.lower()
@@ -63,9 +63,9 @@ def detect_source(filename: str) -> str | None:
     return None
 
 
-# ============================================================================
-# Pipeline definition (STRICT ORDER)
-# ============================================================================
+# =============================================================================
+# Pipeline definition (STRICT DAG)
+# =============================================================================
 
 PRICE_SOURCES: dict[str, Callable] = {
     "index": build_features_from_index_price,
@@ -80,16 +80,34 @@ MICROSTRUCTURE_SOURCES: dict[str, Callable] = {
 }
 
 
-# ============================================================================
+# =============================================================================
+# Validation helpers
+# =============================================================================
+
+def validate_feature_frame(df: pd.DataFrame, source: str) -> None:
+    if "timestamp" not in df.columns:
+        raise ValueError(f"{source}: missing column `timestamp`")
+
+    if not pd.api.types.is_datetime64_ns_dtype(df["timestamp"]):
+        raise TypeError(f"{source}: `timestamp` is not datetime64[ns]")
+
+    if not df["timestamp"].is_unique:
+        raise ValueError(f"{source}: `timestamp` is not unique")
+
+    if not df["timestamp"].is_monotonic_increasing:
+        raise ValueError(f"{source}: `timestamp` is not sorted")
+
+
+# =============================================================================
 # Core processing
-# ============================================================================
+# =============================================================================
 
 def process_single_day(day: date) -> None:
     logger.info(f"Processing {day}")
 
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # 1. Download
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     downloaded_files = download_daily_data(
         symbol=SYMBOL,
         interval=INTERVAL,
@@ -101,9 +119,9 @@ def process_single_day(day: date) -> None:
         logger.warning(f"No files downloaded for {day}")
         return
 
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # 2. Index files by source
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     files_by_source: dict[str, Path] = {}
 
     for file_path in downloaded_files:
@@ -112,9 +130,9 @@ def process_single_day(day: date) -> None:
         if source:
             files_by_source[source] = path
 
-    # ----------------------------------------------------------------------
-    # 3. KLINES (mandatory)
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 3. KLINES — BASE TIME AXIS (MANDATORY)
+    # -------------------------------------------------------------------------
     if "klines" not in files_by_source:
         logger.warning(f"Klines missing for {day}, skipping day")
         return
@@ -122,14 +140,16 @@ def process_single_day(day: date) -> None:
     try:
         df_raw = load_raw_csv(files_by_source["klines"])
         df_klines, df_close_ref = build_features_from_klines(df_raw)
+        validate_feature_frame(df_klines, "klines")
+
         df_day = df_klines.copy()
     except Exception:
         logger.exception(f"Failed to process klines for {day}")
         return
 
-    # ----------------------------------------------------------------------
-    # 4. Price-based sources (depend on klines)
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 4. PRICE-BASED FEATURES (MERGE INTO KLINES)
+    # -------------------------------------------------------------------------
     for source, builder in PRICE_SOURCES.items():
         if source not in files_by_source:
             continue
@@ -137,6 +157,8 @@ def process_single_day(day: date) -> None:
         try:
             df_raw = load_raw_csv(files_by_source[source])
             df_feat = builder(df_raw, df_close_ref)
+
+            validate_feature_frame(df_feat, source)
 
             df_day = df_day.merge(
                 df_feat,
@@ -146,39 +168,42 @@ def process_single_day(day: date) -> None:
         except Exception:
             logger.exception(f"Failed processing {source} for {day}")
 
-    # ----------------------------------------------------------------------
-    # 5. Microstructure sources
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 5. MICROSTRUCTURE FEATURES (OPTIONAL, MERGE)
+    # -------------------------------------------------------------------------
+    # Раскомментируй, когда builders будут готовы
+    #
     # for source, builder in MICROSTRUCTURE_SOURCES.items():
     #     if source not in files_by_source:
     #         continue
-
+    #
     #     try:
     #         df_raw = load_raw_csv(files_by_source[source])
-
+    #
     #         if source == "aggTrades":
     #             df_feat = builder(df_raw, df_close_ref)
     #         else:
     #             df_feat = builder(df_raw)
-
-    #         daily_frames.append(df_feat)
+    #
+    #         validate_feature_frame(df_feat, source)
+    #
+    #         df_day = df_day.merge(
+    #             df_feat,
+    #             on="timestamp",
+    #             how="left",
+    #         )
     #     except Exception:
     #         logger.exception(f"Failed processing {source} for {day}")
 
-    # ----------------------------------------------------------------------
-    # 6. Merge & normalize
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 6. FINAL SANITY CHECK
+    # -------------------------------------------------------------------------
+    assert df_day["timestamp"].is_unique
+    assert df_day["timestamp"].is_monotonic_increasing
 
-    df_day["timestamp"] = pd.to_datetime(
-        df_day["timestamp"],
-        errors="coerce",
-    )
-    df_day = df_day[df_day["timestamp"].notna()]
-    df_day.sort_values("timestamp", inplace=True)
-
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # 7. Persist
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     write_parquet(
         df=df_day,
         symbol=SYMBOL,
@@ -190,9 +215,9 @@ def process_single_day(day: date) -> None:
     logger.info(f"Finished {day}")
 
 
-# ============================================================================
+# =============================================================================
 # Entry point
-# ============================================================================
+# =============================================================================
 
 def main() -> None:
     logger.info("Pipeline started")
