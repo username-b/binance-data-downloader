@@ -1,79 +1,53 @@
-from datetime import date
-from pathlib import Path
 
-
-# ============================================================
-# Источники данных Binance
-# ============================================================
-
-# None  -> данные без таймфрейма (aggTrades, trades, bookTicker)
-# "1m"  -> минутные klines
-DATA_SOURCES = {
-    "klines": "1m",
-    "aggTrades": None,
-    "bookTicker": None,
-    "indexPriceKlines": "1m",
-    "markPriceKlines": "1m",
-    "premiumIndexKlines": "1m",
-    "trades": None,
-}
-
-# Базовый URL Binance Data Vision (USDT-M Futures)
-BINANCE_BASE_URL = "https://data.binance.vision/data/futures/um/daily"
-
-
-# ============================================================
-# Параметры эксперимента
-# ============================================================
-
-# Торговый инструмент
 SYMBOL = "ADAUSDT"
-
-# Базовый таймфрейм моделирования
-# (используется как референс для агрегаций)
+YC_BUCKET = "binance-data-downloader"
+DAYS_BACK = 7
 INTERVAL = "1m"
 
-# Период исследования
-START_DATE = date(2024, 3, 1)
-END_DATE = date(2024, 4, 1)
+BASE_ROOT = "https://data.binance.vision/data/futures/um/daily"
+SOURCE = "klines"
 
-# ============================================================
-# Пути хранения данных
-# ============================================================
+DATA_ROOT = r"C:\projects\binance-data-downloader\data\raw"
 
-# Корень проекта (относительно config.py)
-PROJECT_ROOT = Path(__file__).resolve().parent
-
-# Сырые CSV из Binance
-RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
-
-# Обработанные parquet (dataset)
-PARQUET_DATA_DIR = PROJECT_ROOT / "data" / "parquet"
-
-
-# ============================================================
-# Параметры обработки
-# ============================================================
-
-# Минимально допустимое число минут в дне
-# (для контроля качества данных)
-MIN_MINUTES_PER_DAY = 1_400  # из 1440
-
-# Сортировка обязательна перед сохранением
-SORT_BY_TIMESTAMP = True
-
-# Колонка времени (единый стандарт по проекту)
-TIMESTAMP_COLUMN = "timestamp"
-
-# Тип времени: миллисекунды Unix Epoch
-TIMESTAMP_UNIT = "ms"
-
-PIPELINE_ORDER = [
-    "klines",       # ОБЯЗАТЕЛЬНО
-    "index",
-    "mark",
-    "premium",
-    "aggTrades",
+KLINES_COLUMNS = [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
     "trades",
-    "orderbook",
+    "taker_buy_base",
+    "taker_buy_quote"
 ]
+
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # загружает .env
+
+# =========================
+# YANDEX OBJECT STORAGE
+# =========================
+YC_ACCESS_KEY_ID = os.getenv("YC_ACCESS_KEY_ID")
+YC_SECRET_ACCESS_KEY = os.getenv("YC_SECRET_ACCESS_KEY")
+YC_REGION = os.getenv("YC_REGION", "ru-central1")
+YC_ENDPOINT = os.getenv("YC_ENDPOINT")
+YC_BUCKET = os.getenv("YC_BUCKET")
+
+# =========================
+# VALIDATION (очень важно)
+# =========================
+_required = {
+    "YC_ACCESS_KEY_ID": YC_ACCESS_KEY_ID,
+    "YC_SECRET_ACCESS_KEY": YC_SECRET_ACCESS_KEY,
+    "YC_ENDPOINT": YC_ENDPOINT,
+    "YC_BUCKET": YC_BUCKET,
+}
+
+missing = [k for k, v in _required.items() if not v]
+if missing:
+    raise RuntimeError(f"Missing required env vars: {missing}")

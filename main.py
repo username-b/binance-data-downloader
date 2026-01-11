@@ -1,235 +1,89 @@
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-from datetime import date
-from pathlib import Path
-from typing import Callable
-
+import os
 import pandas as pd
+import requests
+import zipfile
+import io
+from datetime import datetime, timedelta, timezone
+from tqdm import tqdm
 
-from config import (
-    SYMBOL,
-    INTERVAL,
-    START_DATE,
-    END_DATE,
-    RAW_DATA_DIR,
-    PARQUET_DATA_DIR,
-)
-
-from utils.logger import get_logger
-from utils.date_utils import daterange
-
-from downloader.binance_downloader import download_daily_data
-from processing.csv_loader import load_raw_csv
-
-from processing.feature_engineering import (
-    build_features_from_klines,
-    build_features_from_index_price,
-    build_features_from_mark_price,
-    build_features_from_premium,
-    build_features_from_trades,
-    build_features_from_aggTrades,
-    build_features_from_orderbook,
-)
-
-from storage.parquet_writer import write_parquet
+import config
 
 
-logger = get_logger(__name__)
+# =========================
+# DATES
+# =========================
+today = datetime.now(timezone.utc).date()
+dates = sorted([
+    today - timedelta(days=i)
+    for i in range(1, config.DAYS_BACK + 1)
+])
 
 
-# =============================================================================
-# Source detection
-# =============================================================================
-
-def detect_source(filename: str) -> str | None:
-    name = filename.lower()
-
-    if "aggtrades" in name:
-        return "aggTrades"
-    if "bookticker" in name:
-        return "orderbook"
-    if name.endswith("trades.csv"):
-        return "trades"
-    if "indexpriceklines" in name:
-        return "index"
-    if "markpriceklines" in name:
-        return "mark"
-    if "premiumindexklines" in name:
-        return "premium"
-    if "klines" in name:
-        return "klines"
-
-    return None
-
-
-# =============================================================================
-# Pipeline definition (STRICT DAG)
-# =============================================================================
-
-PRICE_SOURCES: dict[str, Callable] = {
-    "index": build_features_from_index_price,
-    "mark": build_features_from_mark_price,
-    "premium": build_features_from_premium,
-}
-
-MICROSTRUCTURE_SOURCES: dict[str, Callable] = {
-    "aggTrades": build_features_from_aggTrades,
-    "trades": build_features_from_trades,
-    "orderbook": build_features_from_orderbook,
-}
-
-
-# =============================================================================
-# Validation helpers
-# =============================================================================
-
-def validate_feature_frame(df: pd.DataFrame, source: str) -> None:
-    if "timestamp" not in df.columns:
-        raise ValueError(f"{source}: missing column `timestamp`")
-
-    if not pd.api.types.is_datetime64_ns_dtype(df["timestamp"]):
-        raise TypeError(f"{source}: `timestamp` is not datetime64[ns]")
-
-    if not df["timestamp"].is_unique:
-        raise ValueError(f"{source}: `timestamp` is not unique")
-
-    if not df["timestamp"].is_monotonic_increasing:
-        raise ValueError(f"{source}: `timestamp` is not sorted")
-
-
-# =============================================================================
-# Core processing
-# =============================================================================
-
-def process_single_day(day: date) -> None:
-    logger.info(f"Processing {day}")
-
-    # -------------------------------------------------------------------------
-    # 1. Download
-    # -------------------------------------------------------------------------
-    downloaded_files = download_daily_data(
-        symbol=SYMBOL,
-        interval=INTERVAL,
-        day=day,
-        output_dir=RAW_DATA_DIR,
-    )
-
-    if not downloaded_files:
-        logger.warning(f"No files downloaded for {day}")
-        return
-
-    # -------------------------------------------------------------------------
-    # 2. Index files by source
-    # -------------------------------------------------------------------------
-    files_by_source: dict[str, Path] = {}
-
-    for file_path in downloaded_files:
-        path = Path(file_path)
-        source = detect_source(path.name)
-        if source:
-            files_by_source[source] = path
-
-    # -------------------------------------------------------------------------
-    # 3. KLINES — BASE TIME AXIS (MANDATORY)
-    # -------------------------------------------------------------------------
-    if "klines" not in files_by_source:
-        logger.warning(f"Klines missing for {day}, skipping day")
-        return
-
+# =========================
+# LOAD + PROCESS
+# =========================
+def load_and_process_file(url: str) -> pd.DataFrame | None:
     try:
-        df_raw = load_raw_csv(files_by_source["klines"])
-        df_klines, df_close_ref = build_features_from_klines(df_raw)
-        validate_feature_frame(df_klines, "klines")
+        r = requests.get(url, timeout=20)
+        if r.status_code != 200:
+            return None
 
-        df_day = df_klines.copy()
-    except Exception:
-        logger.exception(f"Failed to process klines for {day}")
-        return
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            with z.open(z.namelist()[0]) as f:
+                df = pd.read_csv(f, header=0, low_memory=False)
 
-    # -------------------------------------------------------------------------
-    # 4. PRICE-BASED FEATURES (MERGE INTO KLINES)
-    # -------------------------------------------------------------------------
-    for source, builder in PRICE_SOURCES.items():
-        if source not in files_by_source:
-            continue
+        df = df.dropna(how="all")
+        df = df.iloc[:, :len(config.KLINES_COLUMNS)]
+        df.columns = config.KLINES_COLUMNS
 
-        try:
-            df_raw = load_raw_csv(files_by_source[source])
-            df_feat = builder(df_raw, df_close_ref)
 
-            validate_feature_frame(df_feat, source)
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="ignore")
 
-            df_day = df_day.merge(
-                df_feat,
-                on="timestamp",
-                how="left",
-            )
-        except Exception:
-            logger.exception(f"Failed processing {source} for {day}")
+        return df
 
-    # -------------------------------------------------------------------------
-    # 5. MICROSTRUCTURE FEATURES (OPTIONAL, MERGE)
-    # -------------------------------------------------------------------------
-    # Раскомментируй, когда builders будут готовы
-    #
-    # for source, builder in MICROSTRUCTURE_SOURCES.items():
-    #     if source not in files_by_source:
-    #         continue
-    #
-    #     try:
-    #         df_raw = load_raw_csv(files_by_source[source])
-    #
-    #         if source == "aggTrades":
-    #             df_feat = builder(df_raw, df_close_ref)
-    #         else:
-    #             df_feat = builder(df_raw)
-    #
-    #         validate_feature_frame(df_feat, source)
-    #
-    #         df_day = df_day.merge(
-    #             df_feat,
-    #             on="timestamp",
-    #             how="left",
-    #         )
-    #     except Exception:
-    #         logger.exception(f"Failed processing {source} for {day}")
+    except Exception as e:
+        print(f"⚠️ Ошибка {url}: {e}")
+        return None
 
-    # -------------------------------------------------------------------------
-    # 6. FINAL SANITY CHECK
-    # -------------------------------------------------------------------------
-    assert df_day["timestamp"].is_unique
-    assert df_day["timestamp"].is_monotonic_increasing
 
-    # -------------------------------------------------------------------------
-    # 7. Persist
-    # -------------------------------------------------------------------------
-    write_parquet(
-        df=df_day,
-        symbol=SYMBOL,
-        interval=INTERVAL,
-        day=day,
-        base_dir=PARQUET_DATA_DIR,
+# =========================
+# SAVE DIR
+# =========================
+timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+save_dir = os.path.join(config.DATA_ROOT, timestamp_str)
+os.makedirs(save_dir, exist_ok=True)
+
+out_file = os.path.join(save_dir, "klines_1m.csv")
+
+print(f"\n📁 Сохраняем в: {save_dir}")
+
+
+# =========================
+# MAIN LOOP
+# =========================
+for dt in tqdm(dates, desc="Downloading klines"):
+    y = dt.year
+    m = f"{dt.month:02d}"
+    d = f"{dt.day:02d}"
+
+    path = (
+        f"{config.BASE_ROOT}/"
+        f"{config.SOURCE}/"
+        f"{config.SYMBOL}/"
+        f"{config.INTERVAL}"
     )
 
-    logger.info(f"Finished {day}")
+    file_name = f"{config.SYMBOL}-{config.INTERVAL}-{y}-{m}-{d}.zip"
+    url = f"{path}/{file_name}"
+
+    df = load_and_process_file(url)
+
+    if df is not None and not df.empty:
+        header = not os.path.exists(out_file)
+        df.to_csv(out_file, mode="a", header=header, index=False)
+
+    del df
 
 
-# =============================================================================
-# Entry point
-# =============================================================================
-
-def main() -> None:
-    logger.info("Pipeline started")
-
-    for day in daterange(START_DATE, END_DATE):
-        try:
-            process_single_day(day)
-        except Exception:
-            logger.exception(f"Unhandled failure on {day}")
-
-    logger.info("Pipeline finished")
-
-
-if __name__ == "__main__":
-    main()
+print("\n✅ Загрузка klines завершена")

@@ -1,106 +1,152 @@
-import os
 import io
 import zipfile
 import requests
-from datetime import date
-from typing import List, Optional
-
 import pandas as pd
+from datetime import datetime, timedelta, timezone, date
+from tqdm import tqdm
 
+import config
 from utils.logger import get_logger
-from config import BINANCE_BASE_URL, DATA_SOURCES
-from processing.column_names import COLUMN_NAMES
+from downloader.yandex_storage import YandexObjectStorage
 
 
 logger = get_logger(__name__)
 
 
-def _download_and_extract_csv(url: str) -> Optional[pd.DataFrame]:
-    """
-    Скачивает zip-файл и извлекает CSV в DataFrame.
-    """
+# =========================
+# STORAGE
+# =========================
+raw_storage = YandexObjectStorage(
+    bucket=config.YC_BUCKET,
+    prefix="klines_raw"
+)
+
+base_storage = YandexObjectStorage(
+    bucket=config.YC_BUCKET,
+    prefix="klines_base"
+)
+
+
+
+# =========================
+# DATES
+# =========================
+today = datetime.now(timezone.utc).date()
+today = date(2024, 3, 30)
+dates = sorted([
+    today - timedelta(days=i)
+    for i in range(1, config.DAYS_BACK + 1)
+])
+
+logger.info(
+    "Start parquet download | symbol=%s interval=%s days=%d",
+    config.SYMBOL,
+    config.INTERVAL,
+    config.DAYS_BACK,
+)
+
+
+# =========================
+# LOAD + PROCESS
+# =========================
+def extract_klines_base(df: pd.DataFrame) -> pd.DataFrame:
+    base = df[[
+        "open_time",
+        "close",
+    ]].copy()
+
+    # защита
+    base = base.drop_duplicates(subset=["open_time"])
+    base = base.sort_values("open_time")
+
+    return base[[
+        "open_time",
+        "close",
+    ]]
+
+
+def load_and_process_file(url: str) -> pd.DataFrame | None:
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, timeout=20)
         if r.status_code != 200:
+            logger.warning("File not found: %s", url)
             return None
 
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            csv_name = z.namelist()[0]
-            with z.open(csv_name) as f:
+            with z.open(z.namelist()[0]) as f:
                 df = pd.read_csv(f, header=0, low_memory=False)
+
+        df = df.dropna(how="all")
+        df = df.iloc[:, :len(config.KLINES_COLUMNS)]
+        df.columns = config.KLINES_COLUMNS
+
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="ignore")
 
         return df
 
-    except Exception as e:
-        logger.warning(f"Failed to download {url}: {e}")
+    except Exception:
+        logger.exception("Failed to load %s", url)
         return None
 
 
-def _normalize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
-    """
-    Приведение имён и типов колонок.
-    """
-    df = df.dropna(how="all")
-    df.columns = [str(c).strip() for c in df.columns]
+# =========================
+# MAIN LOOP
+# =========================
+weekly_frames: list[pd.DataFrame] = []
 
-    if source in COLUMN_NAMES:
-        target = COLUMN_NAMES[source]
-        k = min(len(target), df.shape[1])
-        df.columns = target[:k]
-        df = df[target[:k]]
+for dt in tqdm(dates, desc="Downloading klines"):
+    y = dt.year
+    m = dt.month
+    d = dt.day
 
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="ignore")
+    path = (
+        f"{config.BASE_ROOT}/"
+        f"{config.SOURCE}/"
+        f"{config.SYMBOL}/"
+        f"{config.INTERVAL}"
+    )
 
-    return df
+    file_name = f"{config.SYMBOL}-{config.INTERVAL}-{y}-{m:02d}-{d:02d}.zip"
+    url = f"{path}/{file_name}"
+
+    df = load_and_process_file(url)
+
+    if df is None or df.empty:
+        logger.info("Skipped %s (no data)", dt)
+        continue
+
+    key = (
+        f"symbol={config.SYMBOL}/"
+        f"interval={config.INTERVAL}/"
+        f"year={y}/"
+        f"month={m:02d}/"
+        f"day={d:02d}.parquet"
+    )
+
+    weekly_frames.append(df)
+
+    if not weekly_frames:
+        logger.warning("No data collected for the period")
+    else:
+        weekly_df = pd.concat(weekly_frames, ignore_index=True)
+        klines_base_df = extract_klines_base(weekly_df)
+        start_date = dates[0]
+        end_date = dates[-1]
+
+        key = (
+            f"{config.SYMBOL}-{config.INTERVAL}-"
+            f"{start_date:%Y-%m-%d}_{end_date:%Y-%m-%d}.parquet"
+        )
+
+        raw_storage.write_parquet(weekly_df, key)
+        base_storage.write_parquet(klines_base_df, key)
+
+        logger.info(
+            "Saved weekly parquet %s | rows=%d",
+            key,
+            len(weekly_df)
+        )
 
 
-def download_daily_data(
-    symbol: str,
-    interval: str,
-    day: date,
-    output_dir: str,
-) -> List[str]:
-    """
-    Загружает ВСЕ источники данных Binance за один день.
-    Возвращает список путей к сохранённым CSV.
-    """
-
-    y = day.year
-    m = f"{day.month:02d}"
-    d = f"{day.day:02d}"
-
-    saved_files: List[str] = []
-
-    day_dir = os.path.join(output_dir, symbol, day.isoformat())
-    os.makedirs(day_dir, exist_ok=True)
-
-    for source, source_interval in DATA_SOURCES.items():
-        if source_interval:
-            path = f"{BINANCE_BASE_URL}/{source}/{symbol}/{source_interval}"
-            file_name = f"{symbol}-{source_interval}-{y}-{m}-{d}.zip"
-        else:
-            path = f"{BINANCE_BASE_URL}/{source}/{symbol}"
-            file_name = f"{symbol}-{source}-{y}-{m}-{d}.zip"
-
-        url = f"{path}/{file_name}"
-        logger.debug(f"Downloading {url}")
-
-        df = _download_and_extract_csv(url)
-        if df is None or df.empty:
-            continue
-
-        df = _normalize_columns(df, source)
-
-        out_path = os.path.join(day_dir, f"{source}.csv")
-        df.to_csv(out_path, index=False)
-
-        saved_files.append(out_path)
-
-        # освобождаем память
-        del df
-
-    if not saved_files:
-        logger.warning(f"No data downloaded for {day}")
-
-    return saved_files
+logger.info("Parquet download finished successfully")
