@@ -18,17 +18,17 @@ p = psutil.Process()
 # =========================
 # STORAGE
 # =========================
+dataset_cfg = config.DATASETS[config.DATASET]
+
 raw_storage = YandexObjectStorage(
     bucket=config.YC_BUCKET,
-    prefix="klines_raw"
+    prefix=dataset_cfg["storage_prefix"]
 )
 
 base_storage = YandexObjectStorage(
     bucket=config.YC_BUCKET,
     prefix="klines_base"
 )
-
-
 
 # =========================
 # DATES
@@ -51,6 +51,22 @@ logger.info(
 # =========================
 # LOAD + PROCESS
 # =========================
+def build_url(dataset, *, symbol, interval, date, base_root):
+    cfg = config.DATASETS[dataset]
+
+    path = [base_root, cfg["source"], symbol]
+    if cfg["has_interval"]:
+        path.append(interval)
+
+    filename = cfg["file_pattern"].format(
+        symbol=symbol,
+        interval=interval,
+        date=f"{date:%Y-%m-%d}",
+    )
+
+    return "/".join(path) + "/" + filename
+
+
 def extract_klines_base(df: pd.DataFrame) -> pd.DataFrame:
     base = df[[
         "open_time",
@@ -79,8 +95,10 @@ def load_and_process_file(url: str) -> pd.DataFrame | None:
                 df = pd.read_csv(f, header=0, low_memory=False)
 
         df = df.dropna(how="all")
-        df = df.iloc[:, :len(config.KLINES_COLUMNS)]
-        df.columns = config.KLINES_COLUMNS
+        columns = dataset_cfg["columns"]
+        df = df.iloc[:, :len(columns)]
+        df.columns = columns
+
 
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="ignore")
@@ -109,15 +127,14 @@ for (year, week), week_dates in weeks.items():
     for dt in tqdm(week_dates, desc=f"Week {year}-W{week}"):
         y, m, d = dt.year, dt.month, dt.day
 
-        path = (
-            f"{config.BASE_ROOT}/"
-            f"{config.SOURCE}/"
-            f"{config.SYMBOL}/"
-            f"{config.INTERVAL}"
-        )
-
         file_name = f"{config.SYMBOL}-{config.INTERVAL}-{y}-{m:02d}-{d:02d}.zip"
-        url = f"{path}/{file_name}"
+        url = build_url(
+            dataset=config.DATASET,
+            symbol=config.SYMBOL,
+            interval=config.INTERVAL,
+            date=dt,
+            base_root=config.BASE_ROOT,
+        )
 
         df = load_and_process_file(url)
 
@@ -132,7 +149,8 @@ for (year, week), week_dates in weeks.items():
         continue
 
     weekly_df = pd.concat(weekly_frames, ignore_index=True)
-    klines_base_df = extract_klines_base(weekly_df)
+    if config.DATASET == "klines":
+        klines_base_df = extract_klines_base(weekly_df)
 
     start_date = min(week_dates)
     end_date = max(week_dates)
@@ -143,7 +161,8 @@ for (year, week), week_dates in weeks.items():
     )
 
     raw_storage.write_parquet(weekly_df, key)
-    base_storage.write_parquet(klines_base_df, key)
+    if config.DATASET == "klines":
+        base_storage.write_parquet(klines_base_df, key)
 
     logger.info(
         "Saved weekly parquet %s | rows=%d",
