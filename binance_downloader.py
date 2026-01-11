@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone, date
 from collections import defaultdict
 from tqdm import tqdm
 import psutil, time
+import gc
 
 import config
 from utils.logger import get_logger
@@ -169,6 +170,13 @@ for (year, week), week_dates in weeks.items():
         key,
         len(weekly_df)
     )
+
+    raw_storage.write_parquet(weekly_df, key)
+
+    del weekly_df
+    del weekly_frames
+    del df
+    gc.collect()
 
 
 
