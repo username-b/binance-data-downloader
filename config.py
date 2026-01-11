@@ -4,14 +4,14 @@ from dotenv import load_dotenv
 
 SYMBOL = "ADAUSDT"
 YC_BUCKET = "binance-data-downloader"
-DAYS_BACK = 2
+DAYS_BACK = 1800
 INTERVAL = "1m"
-DATASET = "aggTrades"
+DATASET = "klines"
 # возможные значения:
 # klines | aggTrades | trades | bookTicker
 
 BASE_ROOT = "https://data.binance.vision/data/futures/um/daily"
-SOURCE = "aggTrades"
+SOURCE = "klines"
 
 DATA_ROOT = r"C:\projects\binance-data-downloader\data\raw"
 
