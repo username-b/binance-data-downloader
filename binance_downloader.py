@@ -34,8 +34,8 @@ base_storage = YandexObjectStorage(
 # =========================
 # DATES
 # =========================
-today = datetime.now(timezone.utc).date()
-# today = date(2024, 3, 30)
+# today = datetime.now(timezone.utc).date()
+today = date(2026, 1, 10)
 dates = sorted([
     today - timedelta(days=i)
     for i in range(1, config.DAYS_BACK + 1)

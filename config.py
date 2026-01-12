@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 SYMBOL = "ADAUSDT"
 YC_BUCKET = "binance-data-downloader"
-DAYS_BACK = 1800
+DAYS_BACK = 438
 INTERVAL = "1m"
 DATASET = "bookTicker"
 # возможные значения:
