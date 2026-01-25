@@ -8,7 +8,8 @@ class YandexObjectStorage:
     
     def __init__(self, bucket: str, prefix: str = ""):
         self.bucket = bucket
-        self.prefix = prefix
+        self.prefix = prefix.strip("/")
+
 
         self.s3 = boto3.client(
         "s3",
