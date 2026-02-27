@@ -5,8 +5,8 @@ INTERVAL = "1m"
 FEATURE_SOURCE = "klines"  
 # просто меняешь это значение
 
-START_DATE = "2026-01-01"
-END_DATE   = "2026-01-02"
+START_DATE = "2026-02-01"
+END_DATE   = "2020-02-01"
 
 RAW_PREFIX = {
     "klines": "klines_raw",
