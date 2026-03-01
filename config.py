@@ -1,7 +1,7 @@
 
 SYMBOL = "ADAUSDT"
 YC_BUCKET = "binance-data-downloader"
-DAYS_BACK = 14
+DAYS_BACK = 2191
 INTERVAL = "1m"
 
 BASE_ROOT = "https://data.binance.vision/data/futures/um/daily"
